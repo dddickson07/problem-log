@@ -1,0 +1,19 @@
+rules_version = '2';
+// Anyone can read the log. Only the owner's Google account can change it.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == "OWNER_EMAIL";
+    }
+    match /problems/{id} {
+      allow read: if true;
+      allow write: if isOwner();
+    }
+    match /pages/{id} {
+      allow read: if true;
+      allow write: if isOwner();
+    }
+  }
+}

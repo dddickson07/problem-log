@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Solve Log</title>
+  <meta name="description" content="A problem log for LeetCode, Codeforces, CSES and quant problems.">
+  <meta name="color-scheme" content="light">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,500;0,600;1,400;1,500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="styles.css">
+  <script src="mathjax-config.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-svg.js" async></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@editorjs/editorjs@2.31.6/dist/editorjs.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@editorjs/header@2.8.8/dist/header.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@editorjs/list@2.0.9/dist/editorjs-list.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@editorjs/inline-code@1.5.2/dist/inline-code.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@editorjs/delimiter@1.4.2/dist/delimiter.umd.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-compat.js"></script>
+  <script src="firebase-config.js"></script>
+</head>
+<body>
+<div id="listView" class="wrap">
+  <header class="mast">
+    <h1>Solve Log</h1>
+    <div class="tally" id="tally"></div>
+  </header>
+  <hr class="thick"><hr class="thin">
+  <div class="agenda" id="agenda"><p class="muted"><i>Loading your problems.</i></p></div>
+  <div class="toolbar">
+    <nav class="adds" id="adds" aria-label="Add a problem"><span class="lead">Add a problem from </span><button type="button" class="link" data-add="lc">LeetCode</button><span class="lead">, </span><button type="button" class="link" data-add="cf">Codeforces</button><span class="lead">, </span><button type="button" class="link" data-add="cses">CSES</button><span class="lead">, or </span><button type="button" class="link" data-add="qt">a quant source</button><span class="lead">.</span></nav>
+    <input type="search" id="fSearch" placeholder="Search problems" aria-label="Search problems">
+  </div>
+  <p class="filt">Showing
+    <select id="fPlat" aria-label="Platform"><option value="">all platforms</option><option value="lc">LeetCode</option><option value="cf">Codeforces</option><option value="cses">CSES</option><option value="qt">quant</option></select>,
+    <select id="fDiff" aria-label="Difficulty"><option value="">all difficulties</option><option value="1-3">difficulty 1 to 3</option><option value="4-6">difficulty 4 to 6</option><option value="7-10">difficulty 7 to 10</option></select>,
+    <select id="fTag" aria-label="Technique"><option value="">all techniques</option></select>,
+    <select id="fSort" aria-label="Sort"><option value="new">newest first</option><option value="old">oldest first</option><option value="due">next review first</option><option value="hard">hardest first</option><option value="easy">easiest first</option></select>.
+    <br><label class="toggle"><input type="checkbox" id="fGreat">Great only</label>
+    <label class="toggle"><input type="checkbox" id="fDue">Due only</label>
+  </p>
+  <p class="notice" id="notice" hidden></p>
+  <ol class="plist" id="plist"></ol>
+  <div class="pager" id="pager"></div>
+  <p class="foot" id="authLine"></p>
+</div>
+
+<div id="pageView" class="wrap" hidden></div>
+<div id="reviewView" class="wrap" hidden></div>
+
+<div class="overlay" id="overlay" hidden>
+  <form class="modal" id="form" novalidate>
+    <h2 id="mTitle">Add problem</h2>
+    <div class="grid">
+      <div class="field wide"><label for="iUrl">Link</label><input id="iUrl" type="url" placeholder="https://leetcode.com/problems/two-sum/"><span class="hint">Paste a link and the title and ID fill in.</span></div>
+      <div class="field wide"><label for="iTitle">Title</label><input id="iTitle" placeholder="Two Sum"></div>
+      <div class="field"><label for="iPlat">Platform</label><select id="iPlat"><option value="lc">LeetCode</option><option value="cf">Codeforces</option><option value="cses">CSES</option><option value="qt">Quant</option></select></div>
+      <div class="field"><label for="iNum">ID</label><input id="iNum" placeholder="1"></div>
+      <div class="field"><label for="iDiff" id="iDiffLabel">Difficulty</label><select id="iDiff"></select></div>
+      <div class="field"><label for="iNorm">Normalized, 1 to 10</label><input id="iNorm" type="number" min="1" max="10" step="1" placeholder="5"></div>
+      <div class="field"><label for="iStatus">Verdict</label><select id="iStatus"><option value="solo">Solved alone</option><option value="hint">Needed a hint</option><option value="editorial">Read the editorial</option></select></div>
+      <div class="field"><label for="iDate">Date</label><input id="iDate" type="date"></div>
+      <div class="field wide"><label for="iSummary">Summary</label><input id="iSummary" placeholder="One line on what it asks"></div>
+      <div class="field wide"><label for="iTags">Techniques</label><input id="iTags" list="tagList" placeholder="Binary Search, Two Pointers"><datalist id="tagList"></datalist><span class="hint">Comma-separated. Reusing the same names keeps the topic suggestions accurate.</span></div>
+      <div class="field wide" id="srcField"><label for="iSrc">Source</label><input id="iSrc" placeholder="Green Book, firm interview"></div>
+    </div>
+    <div class="mActions">
+      <span class="err" id="mErr"></span>
+      <button type="button" class="btn" id="mCancel">Cancel</button>
+      <button type="submit" class="btn" id="mSave">Save</button>
+      <button type="button" class="btn primary" id="mSaveOpen">Save and write up</button>
+    </div>
+  </form>
+</div>
+
+<div class="overlay" id="delOverlay" hidden>
+  <div class="modal" role="alertdialog" aria-labelledby="delTitle">
+    <h2 id="delTitle">Delete this problem?</h2>
+    <p id="delText" class="muted" style="margin:0"></p>
+    <div class="mActions">
+      <button type="button" class="btn" id="delCancel">Keep it</button>
+      <button type="button" class="btn danger" id="delOk">Delete</button>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
