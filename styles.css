@@ -1,3 +1,9 @@
+/* Base reset (the Claude artifact wrapper used to supply this) */
+:root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+body { margin: 0; }
+img { max-width: 100%; }
+[hidden] { display: none !important; }
+
 /* Layout: a typeset problem sheet. One centered column; rules and hairlines instead of boxes; small caps carry every label. Always light, by design. */
 :root {
   color-scheme: light;
