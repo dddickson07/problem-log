@@ -5,7 +5,7 @@ service cloud.firestore {
     function isOwner() {
       return request.auth != null
         && request.auth.token.email_verified == true
-        && request.auth.token.email == "OWNER_EMAIL";
+        && request.auth.token.email == "dddickson@college.harvard.edu";
     }
     match /problems/{id} {
       allow read: if true;
