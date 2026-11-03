@@ -346,6 +346,62 @@
   function autoGrow(ta) { ta.style.height = "auto"; ta.style.height = ta.scrollHeight + "px"; }
   const BLANK_ICON = '<svg width="1" height="1"></svg>';
 
+  // Tab indents inside any multi-line typing box instead of moving focus.
+  // Code blocks handle their own Tab; list items keep the list's own Tab (nest) and Shift+Tab (un-nest).
+  const INDENT = "    ";
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Tab" || e.altKey || e.ctrlKey || e.metaKey) return;
+    const t = e.target;
+    if (!t || !t.closest) return;
+    if (t.tagName === "TEXTAREA") {
+      if (t.readOnly || t.disabled || t.closest(".xcode")) return;
+      e.preventDefault(); e.stopPropagation();
+      const s = t.selectionStart, en = t.selectionEnd, val = t.value;
+      if (s === en && !e.shiftKey) t.setRangeText(INDENT, s, en, "end");
+      else { const ls = val.lastIndexOf("\n", s - 1) + 1; const blk = val.slice(ls, en); t.setRangeText(e.shiftKey ? blk.replace(/^ {1,4}/gm, "") : blk.replace(/^/gm, INDENT), ls, en, e.shiftKey && s === en ? "end" : "select"); }
+      t.dispatchEvent(new Event("input", { bubbles: true }));
+      return;
+    }
+    const ce = t.closest('[contenteditable="true"]');
+    if (!ce || !ce.closest(".codex-editor")) return;
+    if (ce.closest(".cdx-list") || ce.closest(".cdx-list__item")) return; // the list tool nests items itself
+    e.preventDefault(); e.stopPropagation();
+    if (!e.shiftKey) { document.execCommand("insertText", false, " ".repeat(INDENT.length)); return; }
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || !sel.isCollapsed) return;
+    const node = sel.anchorNode;
+    if (!node || node.nodeType !== 3) return;
+    const m = node.data.slice(0, sel.anchorOffset).match(/[  ]{1,4}$/);
+    if (m) for (let i = 0; i < m[0].length; i++) document.execCommand("delete");
+  }, true);
+
+  // Markdown-style list shortcuts at the start of a paragraph: "- ", "* ", "1. ", "[] ".
+  function listShortcuts(holderEl, ed) {
+    holderEl.addEventListener("keydown", (e) => {
+      if (e.key !== " " || e.altKey || e.ctrlKey || e.metaKey) return;
+      let idx, block;
+      try { idx = ed.blocks.getCurrentBlockIndex(); block = ed.blocks.getBlockByIndex(idx); } catch (err) { return; }
+      if (!block || block.name !== "paragraph") return;
+      const para = block.holder && block.holder.querySelector(".ce-paragraph");
+      const sel = window.getSelection();
+      if (!para || !sel || !sel.rangeCount || !sel.isCollapsed || !para.contains(sel.anchorNode)) return;
+      const pre = sel.getRangeAt(0).cloneRange(); pre.selectNodeContents(para); pre.setEnd(sel.anchorNode, sel.anchorOffset);
+      const before = pre.toString().replace(/ /g, " ").trim();
+      let style = null;
+      if (/^[-*•]$/.test(before)) style = "unordered";
+      else if (/^1[.)]$/.test(before)) style = "ordered";
+      else if (/^\[ ?\]$/.test(before)) style = "checklist";
+      if (!style) return;
+      e.preventDefault();
+      const rest = para.innerHTML.replace(/^(\s|&nbsp;)*(-|\*|•|1[.)]|\[ ?\])(\s|&nbsp;)*/, "");
+      const item = { content: rest, meta: style === "checklist" ? { checked: false } : {}, items: [] };
+      try {
+        ed.blocks.insert("list", { style, meta: style === "ordered" ? { start: 1, counterType: "numeric" } : {}, items: [item] }, undefined, idx, true, true);
+        ed.caret.setToBlock(idx, rest ? "end" : "start");
+      } catch (err) { console.warn(err); }
+    }, true);
+  }
+
   class CodeTool {
     static get toolbox() { return { title: "Code", icon: BLANK_ICON }; }
     static get enableLineBreaks() { return true; }
@@ -496,6 +552,10 @@
       i18n: { messages: { toolNames: { "Text": "Text", "Heading": "Heading", "Unordered List": "List", "Ordered List": "Numbered list", "Checklist": "Checklist", "Delimiter": "Divider", "Bold": "Bold", "Italic": "Italic", "Link": "Link", "InlineCode": "Inline code" },
         blockTunes: { delete: { "Delete": "Delete", "Click to delete": "Click again to delete" }, moveUp: { "Move up": "Move up" }, moveDown: { "Move down": "Move down" } } } }
     });
+    if (tools.list && canWrite) {
+      const holderEl = typeof holder === "string" ? $(holder) : holder;
+      ed.isReady.then(() => { if (holderEl) listShortcuts(holderEl, ed); }).catch(() => {});
+    }
     return { save: async () => { try { await ed.isReady; const out = await ed.save(); return out.blocks || []; } catch (e) { return null; } }, destroy: () => { try { ed.destroy(); } catch (e) {} } };
   }
   function fallbackEditor(holder, blocks, placeholder, onChange) {
