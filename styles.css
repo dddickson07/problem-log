@@ -246,3 +246,17 @@ body .ce-block--selected .ce-block__content { background: var(--accent-wash); }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .foot { text-align: center; color: var(--faint); font-size: 15px; margin: 28px 0 0; }
+
+/* daily redo list */
+.redo { margin: 6px 0 0; padding-left: 1.4em; display: flex; flex-direction: column; gap: 12px; font-size: 17px; }
+.redo li.done .pt { color: var(--muted); }
+.redo .rtags { font-size: 15px; font-style: italic; }
+.redo .why { font-size: 15px; color: var(--muted); }
+.outs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.out { font-family: var(--f-serif); font-size: 15px; padding: 3px 10px; border: 0.5px solid var(--rule2); background: var(--white); border-radius: 0; cursor: pointer; }
+.out:hover { border-color: currentColor; }
+.out:disabled { opacity: .5; cursor: default; }
+.out.solo, .rate.solo { color: var(--green); }
+.out.hint, .rate.hint { color: var(--amber); }
+.out.miss, .rate.miss { color: var(--red); }
+.rnote { display: block; width: 100%; max-width: 60ch; box-sizing: border-box; margin: 10px 0 0; font: inherit; font-size: 16px; padding: 8px 10px; border: 0.5px solid var(--rule2); background: var(--white); resize: vertical; }

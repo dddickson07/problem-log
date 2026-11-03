@@ -127,8 +127,96 @@
   const isDue = (it) => !!it.revisit || (!srsOf(it).mastered && srsOf(it).due <= today());
   const RQ = { again: 0, hard: 0.5, good: 0.9, easy: 1 };
   const VQ = { solo: 0.85, hint: 0.45, editorial: 0.2 };
-  function quality(it) { const h = srsOf(it).history; return h.length ? RQ[h[h.length - 1].r] : (VQ[verdictOf(it)] ?? 0.5); }
-  function risk(it) { const s = srsOf(it); const late = Math.max(0, daysBetween(s.due, today())); return (late + 1) / Math.max(1, s.interval) + (1 - quality(it)); }
+
+  // ================= daily redo picker =================
+  // Each problem gets weight = Need x Time x Topic x Mastery; five are drawn a day in proportion to weight.
+  const DAILY = 5;
+  const OUT = { again: "miss", hard: "hint", good: "solo", easy: "solo", solo: "solo", hint: "hint", miss: "miss", editorial: "miss" };
+  const OUT_LABEL = { solo: "solved alone", hint: "needed a hint", miss: "couldn't solve" };
+  const OUT_BTN = { solo: "Solved alone", hint: "Needed a hint", miss: "Couldn't solve" };
+  const NEED = { solo: 1, hint: 2, miss: 3 };
+  const COOLDOWN = [2, 5, 10, 21]; // days to rest after 0, 1, 2, 3+ solo solves in a row
+  const normTag = (t) => String(t).toLowerCase().trim();
+  function outcomesOf(it) { return [OUT[verdictOf(it)] || "miss"].concat((it.history || []).map(h => OUT[h.r]).filter(Boolean)); }
+  function lastDoneOf(it) { const h = it.history || []; return (h.length && h[h.length - 1].d) || it.solvedAt || today(); }
+  function streakOf(o) { let n = 0; for (let i = o.length - 1; i >= 0 && o[i] === "solo"; i--) n++; return n; }
+  function tagDays() {
+    const last = {};
+    items.forEach(it => {
+      const mx = [it.solvedAt].concat((it.history || []).map(h => h.d)).filter(Boolean).sort().pop();
+      if (mx) (it.tags || []).forEach(t => { const k = normTag(t); if (!last[k] || mx > last[k]) last[k] = mx; });
+    });
+    return last;
+  }
+  function factors(it, tl) {
+    const o = outcomesOf(it), lastO = o[o.length - 1];
+    const need = NEED[lastO] + Math.min(1.5, 0.5 * o.slice(0, -1).filter(x => x !== "solo").length);
+    const streak = streakOf(o), cool = COOLDOWN[Math.min(streak, 3)];
+    const d = Math.max(0, daysBetween(lastDoneOf(it), today()));
+    const time = d < cool ? 0 : Math.min(3, 0.5 + d / 14);
+    const tags = (it.tags || []).map(normTag);
+    let topic = 1, staleTag = "";
+    if (tags.length) topic = Math.max(...tags.map(t => { const td = tl[t] ? daysBetween(tl[t], today()) : 99; const f = td <= 2 ? 0.5 : td <= 7 ? 1 : 1.5; if (f === 1.5 && !staleTag) staleTag = t; return f; }));
+    const mastery = streak >= 3 ? 0.3 : 1;
+    return { weight: need * time * topic * mastery, need, time, topic, mastery, lastO, d, streak, cool, staleTag: topic === 1.5 ? staleTag : "" };
+  }
+  const todays = () => items.filter(it => it.pickedOn === today()).sort((a, b) => (a.pickRank || 0) - (b.pickRank || 0));
+  function dailyChance(it) {
+    const tl = tagDays(); let tot = 0, w = 0;
+    items.forEach(x => { const f = factors(x, tl).weight; tot += f; if (x.id === it.id) w = f; });
+    if (!tot || !w) return 0;
+    return 1 - Math.pow(1 - w / tot, DAILY);
+  }
+  let drawing = false, drawnFor = "";
+  async function ensureToday(force) {
+    if (!canWrite || !probCol || !loaded || drawing) return;
+    if (drawnFor === today() && !force) return;
+    drawnFor = today();
+    const have = todays(), want = DAILY - have.length;
+    if (want <= 0) return;
+    const tl = tagDays();
+    const pool = items.filter(it => it.pickedOn !== today() && it.swappedOn !== today())
+      .map(it => ({ it, w: factors(it, tl).weight, tags: new Set((it.tags || []).map(normTag)) })).filter(x => x.w > 0);
+    for (const h of have) { const ht = new Set((h.tags || []).map(normTag)); pool.forEach(x => { for (const t of ht) if (x.tags.has(t)) { x.w *= 0.4; break; } }); }
+    const picks = [];
+    while (picks.length < want && pool.length) {
+      const tot = pool.reduce((a, x) => a + x.w, 0); if (tot <= 0) break;
+      let r = Math.random() * tot, k = 0;
+      while (k < pool.length - 1 && (r -= pool[k].w) > 0) k++;
+      const [pk] = pool.splice(k, 1); picks.push(pk.it);
+      pool.forEach(x => { for (const t of pk.tags) if (x.tags.has(t)) { x.w *= 0.4; break; } });
+    }
+    if (!picks.length) return;
+    drawing = true;
+    const base = have.reduce((m, x) => Math.max(m, (x.pickRank || 0) + 1), 0);
+    try { await Promise.all(picks.map((it, i) => probCol.doc(it.id).update({ pickedOn: today(), pickRank: base + i, pickDone: "" }))); }
+    catch (err) { handleWriteError(err); drawnFor = ""; }
+    drawing = false;
+  }
+  async function recordOutcome(id, o, note) {
+    const it = items.find(x => x.id === id); if (!it || !probCol || !OUT_LABEL[o]) return false;
+    if (!canWrite) { toast("Sign in as the owner to record redos."); return false; }
+    const entry = { d: today(), r: o }; if (note && note.trim()) entry.n = note.trim().slice(0, 500);
+    const upd = { history: (it.history || []).concat([entry]).slice(-30), lastOutcome: o };
+    if (it.pickedOn === today()) upd.pickDone = o;
+    try { await probCol.doc(id).update(upd); return true; } catch (err) { handleWriteError(err); return false; }
+  }
+  async function swapOut(id) {
+    const it = items.find(x => x.id === id); if (!it || !probCol || !canWrite) return;
+    try { await probCol.doc(id).update({ pickedOn: "", swappedOn: today(), pickDone: "" }); it.pickedOn = ""; it.swappedOn = today(); await ensureToday(true); }
+    catch (err) { handleWriteError(err); }
+  }
+  async function addToToday(id) {
+    const it = items.find(x => x.id === id); if (!it || !probCol || !canWrite) return;
+    const rank = todays().reduce((m, x) => Math.max(m, (x.pickRank || 0) + 1), 0);
+    try { await probCol.doc(id).update({ pickedOn: today(), pickRank: rank, pickDone: "", swappedOn: "" }); toast("Added to today's redo"); }
+    catch (err) { handleWriteError(err); }
+  }
+  function reasonText(it, f) {
+    const parts = [`${f.lastO === "solo" ? "Solved alone" : f.lastO === "hint" ? "Needed a hint" : "Couldn't solve"} last time, ${f.d === 0 ? "today" : f.d === 1 ? "1 day ago" : f.d + " days ago"}`];
+    if (f.staleTag) parts.push(`no ${f.staleTag} practice in over a week`);
+    return parts.join("; ");
+  }
 
   // ================= next topics =================
   function nextTopics() {
@@ -166,17 +254,18 @@
     const out = items.filter(it => {
       if (plat && it.platform !== plat) return false;
       if ($("fGreat").checked && !it.great) return false;
-      if ($("fDue").checked && !isDue(it)) return false;
+      if ($("fDue").checked && it.pickedOn !== today()) return false;
       if (tag && !(it.tags || []).includes(tag)) return false;
       if (diff) { const [lo, hi] = diff.split("-").map(Number); const n = Number(it.norm); if (!n || n < lo || n > hi) return false; }
       if (q) { const hay = [it.title, it.num, it.summary, it.source, it.difficulty, (it.tags || []).join(" "), (it.methods || []).map(m => m.name).join(" ")].join(" ").toLowerCase(); if (!hay.includes(q)) return false; }
       return true;
     });
     const key = (it) => (it.solvedAt || "") + String(it.createdAt || 0).padStart(15, "0");
-    const dkey = (it) => srsOf(it).mastered ? "9" : srsOf(it).due;
+    const tl = sort === "due" ? tagDays() : null, wk = {};
+    if (tl) out.forEach(it => { wk[it.id] = factors(it, tl).weight; });
     out.sort((a, b) => {
       if (sort === "old") return key(a) < key(b) ? -1 : 1;
-      if (sort === "due") return dkey(a) < dkey(b) ? -1 : dkey(a) > dkey(b) ? 1 : 0;
+      if (sort === "due") return (wk[b.id] || 0) - (wk[a.id] || 0);
       if (sort === "hard") return (Number(b.norm) || 0) - (Number(a.norm) || 0);
       if (sort === "easy") return (Number(a.norm) || 99) - (Number(b.norm) || 99);
       return key(a) < key(b) ? 1 : -1;
@@ -184,10 +273,9 @@
     return out;
   }
   function markHTML(it) {
-    const s = srsOf(it);
-    if (isDue(it)) return `<span class="mark due">review today</span>`;
-    if (s.mastered) return `<span class="mark">mastered</span>`;
-    return `<span class="mark">review ${esc(fmtDate(s.due))}</span>`;
+    if (it.pickedOn === today()) return it.pickDone ? `<span class="mark">redone today</span>` : `<span class="mark due">redo today</span>`;
+    if (streakOf(outcomesOf(it)) >= 3) return `<span class="mark">mastered</span>`;
+    return `<span class="mark">last done ${esc(fmtDate(lastDoneOf(it)))}</span>`;
   }
   const joinList = (arr) => arr.length < 2 ? arr.join("") : arr.slice(0, -1).join(", ") + (arr.length > 2 ? "," : "") + " and " + arr[arr.length - 1];
   function metaText(it) {
@@ -226,9 +314,9 @@
     $("tagList").innerHTML = [...new Set(SUGGESTED_TAGS.concat(tags))].map(t => `<option value="${esc(t)}"></option>`).join("");
 
     if (!loaded) return;
-    const due = items.filter(isDue).length;
+    ensureToday();
     const topics = nextTopics();
-    let ag = `<p><b>Due today.</b> ` + (due ? `<span class="due">${due} problem${due === 1 ? "" : "s"}.</span> <a href="#review">Start review</a>` : `None.`) + `</p>`;
+    let ag = redoHTML();
     if (topics.length) {
       const tp = topics.map(t => `${t.href ? `<a href="${esc(t.href)}" target="_blank" rel="noopener">${esc(t.label)}</a>` : esc(t.label)} ${t.plat === "Quant" ? "in quant" : "on " + esc(t.plat)}`);
       ag += `<p><b>Next to try.</b> ${joinList(tp)}.</p>`;
@@ -247,6 +335,34 @@
       ? `<button type="button" class="link" data-pg="prev" ${listPage === 0 ? "disabled" : ""}>Previous</button><span>${listPage + 1}</span><button type="button" class="link" data-pg="next" ${listPage >= pages - 1 ? "disabled" : ""}>Next</button>`
       : (list.length ? `<span>${listPage + 1}</span>` : "");
   }
+  function redoHTML() {
+    const set = todays();
+    if (!set.length) {
+      const msg = !items.length ? "Nothing yet. Problems join the rotation a couple of days after you solve them."
+        : drawing ? "Picking today's five." : "Nothing to redo today. Every problem is resting after a recent attempt.";
+      return `<p><b>Today's redo.</b> <span class="muted">${msg}</span></p>`;
+    }
+    const tl = tagDays(), done = set.filter(x => x.pickDone).length;
+    const left = set.length - done;
+    let h = `<p><b>Today's redo.</b> ${done} of ${set.length} done.${left ? ` <a href="#review">Start</a>` : ` <span class="muted">All done for today.</span>`}</p><ol class="redo">`;
+    for (const it of set) {
+      const f = factors(it, tl);
+      h += `<li class="${it.pickDone ? "done" : ""}"><div><a class="pt" href="#p-${esc(it.id)}">${esc(it.title || "Untitled")}</a>${(it.tags || []).length ? ` <span class="muted rtags">${esc(joinList(it.tags))}</span>` : ""}</div>`;
+      if (it.pickDone) h += `<div class="why"><i>Done today: ${esc(OUT_LABEL[it.pickDone] || it.pickDone)}.</i></div>`;
+      else {
+        h += `<div class="why">${esc(reasonText(it, f))}.</div>`;
+        if (canWrite) h += `<div class="outs">${["solo","hint","miss"].map(o => `<button type="button" class="out ${o}" data-out="${o}" data-id="${esc(it.id)}">${OUT_BTN[o]}</button>`).join("")}<button type="button" class="link muted" data-swap="${esc(it.id)}">Swap</button></div>`;
+      }
+      h += `</li>`;
+    }
+    return h + `</ol>`;
+  }
+  $("agenda").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-out]");
+    if (b) { b.disabled = true; await recordOutcome(b.dataset.id, b.dataset.out, ""); return; }
+    const sw = e.target.closest("[data-swap]");
+    if (sw) { sw.disabled = true; await swapOut(sw.dataset.swap); }
+  });
   const sizer = document.createElement("span");
   sizer.style.cssText = "position:absolute;visibility:hidden;white-space:pre;font:16px var(--f-serif)";
   document.body.appendChild(sizer);
@@ -624,11 +740,16 @@
   }
   function pageHeadHTML(it) {
     if (!it) return "";
-    const p = PLAT[it.platform] || PLAT.lc, s = srsOf(it), url = safeUrl(it.url), lab = probLabel(it);
+    const p = PLAT[it.platform] || PLAT.lc, url = safeUrl(it.url), lab = probLabel(it);
+    const f = factors(it, tagDays());
     let status;
-    if (isDue(it)) status = `<span class="due">Review today.</span> <a href="#review">Start review</a>`;
-    else if (s.mastered) status = `Mastered after ${s.reps} review${s.reps === 1 ? "" : "s"}.${canWrite ? ` <button type="button" class="link" id="pBack">Bring it back</button>` : ""}`;
-    else status = `Next review ${esc(fmtDate(s.due))}${s.reps ? `, reviewed ${s.reps} time${s.reps === 1 ? "" : "s"}` : ""}.`;
+    if (it.pickedOn === today()) status = it.pickDone ? `Redone today: ${esc(OUT_LABEL[it.pickDone] || it.pickDone)}.` : `<span class="due">On today's redo list.</span> <a href="#review">Start</a>`;
+    else {
+      const last = `Last done ${esc(fmtDate(lastDoneOf(it)))}: ${esc(OUT_LABEL[f.lastO])}.`;
+      const pct = Math.round(dailyChance(it) * 100);
+      const when = f.time === 0 ? ` Resting until ${esc(fmtDate(addDays(lastDoneOf(it), f.cool)))}.` : ` About ${pct < 1 ? "<1" : pct}% chance of coming up on a given day${f.streak >= 3 ? " (mastered, so it comes up rarely)" : ""}.`;
+      status = last + when + (canWrite ? ` <button type="button" class="link" id="pAdd">Add to today</button>` : "");
+    }
     return `<h1 class="ptitle">${lab ? `<span class="muted" style="font-weight:600">${esc(lab)}.</span> ` : ""}${esc(it.title)}</h1>
       <div class="pmeta">
         <span><i>${esc(metaText(it))}.</i> ${esc(VERDICT[verdictOf(it)][0].toUpperCase() + VERDICT[verdictOf(it)].slice(1))}${it.solvedAt ? " on " + esc(fmtDate(it.solvedAt, true)) : ""}.</span>
@@ -700,7 +821,7 @@
     const tgt = e.target;
     if (tgt.id === "pEdit" && it) return openForm(it.platform, it);
     if (tgt.id === "pDelete" && it) { pendingDelete = it; $("delText").textContent = `“${it.title}” and its write-up will be removed.`; $("delOverlay").hidden = false; $("delCancel").focus(); return; }
-    if (tgt.id === "pBack" && it) { try { await probCol.doc(it.id).update({ mastered: false, interval: 1, due: today() }); } catch (err) { handleWriteError(err); } return; }
+    if (tgt.id === "pAdd" && it) { tgt.disabled = true; await addToToday(it.id); return; }
     if (tgt.id === "pCollapse") {
       const w = $("pboxWrap"); w.hidden = !w.hidden; tgt.textContent = w.hidden ? "Show" : "Hide";
       try { localStorage.setItem("solvelog-collapse-" + P.id, w.hidden ? "1" : "0"); } catch (err) {}
@@ -776,23 +897,24 @@
   }
 
   // ================= review session =================
-  const R = { queue: [], i: 0, revealed: false, tally: { again: 0, hard: 0, good: 0, easy: 0 }, page: null, tab: 0, busy: false };
+  const R = { queue: [], i: 0, revealed: false, tally: { solo: 0, hint: 0, miss: 0 }, page: null, tab: 0, busy: false };
   function startReview() {
-    R.queue = items.filter(isDue).sort((a, b) => risk(b) - risk(a)).map(it => it.id);
-    R.i = 0; R.tally = { again: 0, hard: 0, good: 0, easy: 0 };
+    R.queue = todays().filter(it => !it.pickDone).map(it => it.id);
+    R.i = 0; R.tally = { solo: 0, hint: 0, miss: 0 };
     showView("reviewView"); renderCard();
   }
   async function renderCard() {
     const v = $("reviewView");
-    if (!R.queue.length) { v.innerHTML = `<div class="bar"><a href="#">All problems</a></div><h1 class="ptitle">Nothing due.</h1><p class="muted" style="margin-top:8px">Every problem is scheduled for later. ${nextDueLine()}</p>`; return; }
+    if (!R.queue.length) { v.innerHTML = `<div class="bar"><a href="#">All problems</a></div><h1 class="ptitle">Nothing left today.</h1><p class="muted" style="margin-top:8px">${esc(nextDueLine())}</p>`; return; }
     if (R.i >= R.queue.length) return renderSummary();
     const it = items.find(x => x.id === R.queue[R.i]);
     if (!it) { R.i++; return renderCard(); }
     R.revealed = false; R.tab = 0; R.page = null;
-    const p = PLAT[it.platform] || PLAT.lc, s = srsOf(it), lab = probLabel(it);
-    const last = s.reps ? `last reviewed ${Math.max(0, daysBetween(s.history.length ? s.history[s.history.length - 1].d : s.due, today()))} days ago` : "first review";
+    const p = PLAT[it.platform] || PLAT.lc, lab = probLabel(it);
+    const f = factors(it, tagDays());
+    const last = reasonText(it, f);
     v.innerHTML = `
-      <div class="bar"><span class="muted"><i>Review ${R.i + 1} of ${R.queue.length}</i></span><a href="#">End session</a></div>
+      <div class="bar"><span class="muted"><i>Redo ${R.i + 1} of ${R.queue.length}</i></span><a href="#">End session</a></div>
       <div class="progress"><i style="width:${Math.round((R.i / R.queue.length) * 100)}%"></i></div>
       <h1 class="ptitle">${lab ? `<span class="muted" style="font-weight:600">${esc(lab)}.</span> ` : ""}${esc(it.title)}</h1>
       <div class="pmeta"><span><i>${esc(metaText(it))}.</i> ${last[0].toUpperCase() + last.slice(1)}.</span>${safeUrl(it.url) ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">Open problem</a>` : ""}</div>
@@ -812,16 +934,16 @@
     if (!R.page && it) thoughts = legacyThoughts(it);
     const ms = (pg.methods && pg.methods.length) ? pg.methods : [];
     const m = ms[R.tab];
-    const s = srsOf(it);
     return `
       <section class="area" style="margin-top:6px"><div class="ahead"><span class="label">My thoughts</span></div><div class="ro">${blocksHTML(thoughts)}</div></section>
       ${ms.length ? `<section class="area"><div class="tabs" role="tablist">${ms.map((x, i) => `<button type="button" class="tab" role="tab" aria-selected="${i === R.tab}" data-rtab="${i}">(${letter(i)}) ${esc(x.name || "Untitled")}${x.best ? ` <span class="best">(best)</span>` : ""}</button>`).join("")}</div>
         ${m && (m.time || m.space) ? `<p class="cx" style="margin:0 0 6px">${m.time ? `Time <span style="font-family:var(--f-mono)">${esc(m.time)}</span>` : ""}${m.space ? ` Space <span style="font-family:var(--f-mono)">${esc(m.space)}</span>` : ""}</p>` : ""}
         <div class="ro">${blocksHTML(m ? m.blocks : [])}</div></section>` : ""}
       <hr class="thick" style="margin-top:26px">
-      <p style="margin:0;font-size:18px">How well did you remember it?</p>
-      <div class="rates">${["again","hard","good","easy"].map((r, k) => `<button type="button" class="rate ${r}" data-rate="${r}">${r[0].toUpperCase() + r.slice(1)}<small>${nextGap(s, r)} day${nextGap(s, r) === 1 ? "" : "s"}</small></button>`).join("")}</div>
-      <p class="keys">Keys 1 to 4 work too. Rating moves to the next problem.</p>`;
+      <p style="margin:0;font-size:18px">How did it go?</p>
+      <textarea id="rNote" class="rnote" rows="2" placeholder="Optional: what tripped you up"></textarea>
+      <div class="rates">${["solo","hint","miss"].map(o => `<button type="button" class="rate ${o}" data-rate="${o}">${OUT_BTN[o]}</button>`).join("")}</div>
+      <p class="keys">Keys 1 to 3 work too. Choosing one moves to the next problem.</p>`;
   }
   function drawReveal() { const b = $("rBody"); if (!b) return; b.innerHTML = revealHTML(); finishRO(b); }
   async function rate(r) {
@@ -829,23 +951,18 @@
     const it = items.find(x => x.id === R.queue[R.i]); if (!it || !probCol) return;
     if (!canWrite) { toast("Sign in as the owner to record reviews."); return; }
     R.busy = true;
-    try { await probCol.doc(it.id).update(schedule(srsOf(it), r)); R.tally[r]++; R.i++; renderCard(); window.scrollTo({ top: 0 }); }
-    catch (err) { handleWriteError(err); }
+    const note = $("rNote") ? $("rNote").value : "";
+    if (await recordOutcome(it.id, r, note)) { R.tally[r]++; R.i++; renderCard(); window.scrollTo({ top: 0 }); }
     R.busy = false;
   }
-  function nextDueLine() {
-    const upcoming = items.filter(it => !srsOf(it).mastered).map(it => srsOf(it).due).filter(d => d > today()).sort();
-    if (!upcoming.length) return "";
-    const d = upcoming[0], n = upcoming.filter(x => x === d).length;
-    return `Next review: ${fmtDate(d)}, ${n} problem${n === 1 ? "" : "s"}.`;
-  }
+  function nextDueLine() { return "Tomorrow's five are picked the first time you open Solve Log that day."; }
   function renderSummary() {
-    const t = R.tally, n = t.again + t.hard + t.good + t.easy;
-    const parts = ["again","hard","good","easy"].filter(k => t[k]).map(k => `${t[k]} ${k}`);
+    const t = R.tally, n = t.solo + t.hint + t.miss;
+    const parts = ["solo","hint","miss"].filter(k => t[k]).map(k => `${t[k]} ${OUT_LABEL[k]}`);
     $("reviewView").innerHTML = `
       <div class="progress"><i style="width:100%"></i></div>
       <h1 class="ptitle">Done for today.</h1>
-      <p style="margin:10px 0 0;font-size:18px">${n} reviewed${parts.length ? ": " + parts.join(", ") : ""}.</p>
+      <p style="margin:10px 0 0;font-size:18px">${n} redone${parts.length ? ": " + parts.join(", ") : ""}.</p>
       <p class="muted" style="margin:6px 0 18px">${esc(nextDueLine())}</p>
       <a href="#">Back to all problems</a>`;
   }
@@ -857,7 +974,7 @@
   document.addEventListener("keydown", (e) => {
     if ($("reviewView").hidden || !R.revealed || e.metaKey || e.ctrlKey || e.altKey) return;
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName)) return;
-    const map = { "1": "again", "2": "hard", "3": "good", "4": "easy" };
+    const map = { "1": "solo", "2": "hint", "3": "miss" };
     if (map[e.key]) { e.preventDefault(); rate(map[e.key]); }
   });
 
