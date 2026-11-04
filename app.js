@@ -125,6 +125,51 @@
     return { interval, ease, reps: (s.reps || 0) + 1, lapses, due: addDays(today(), interval), mastered: interval >= 60, history, revisit: false };
   }
   const isDue = (it) => !!it.revisit || (!srsOf(it).mastered && srsOf(it).due <= today());
+
+  // ---- "Reviewed today?" — log a review outside the schedule ----
+  const rtOpen = new Set(); // problems whose rating picker is showing
+  function reviewedToday(it) { const h = srsOf(it).history; return h.length > 0 && h[h.length - 1].d === today(); }
+  function reviewedTodayHTML(it) {
+    const done = reviewedToday(it);
+    if (!canWrite && !done) return "";
+    const box = `<label class="check rtoday"><input type="checkbox" data-rt="${esc(it.id)}" ${done || rtOpen.has(it.id) ? "checked" : ""} ${canWrite ? "" : "disabled"}> Reviewed today?</label>`;
+    if (!rtOpen.has(it.id) || done) return box;
+    const s = srsOf(it);
+    return box + `<span class="rtpick">How well did you remember it? ${["again","hard","good","easy"].map(r =>
+      `<button type="button" class="link rtrate ${r}" data-rtrate="${r}" data-id="${esc(it.id)}">${r[0].toUpperCase() + r.slice(1)}</button> <small>${nextGap(s, r)}d</small>`).join(" ")} <button type="button" class="link muted" data-rtcancel="${esc(it.id)}">Cancel</button></span>`;
+  }
+  async function logReview(id, r) {
+    const it = items.find(x => x.id === id); if (!it || !probCol) return;
+    const s = srsOf(it);
+    const patch = schedule(s, r);
+    patch.preReview = { interval: s.interval, ease: s.ease, reps: s.reps, lapses: s.lapses, due: s.due, mastered: s.mastered, history: s.history, revisit: !!it.revisit, on: today() };
+    rtOpen.delete(id);
+    try { await probCol.doc(id).update(patch); toast(`Review logged. Next one in ${patch.interval} day${patch.interval === 1 ? "" : "s"}.`); }
+    catch (err) { handleWriteError(err); refreshReviewedToday(); }
+  }
+  async function undoReview(id) {
+    const it = items.find(x => x.id === id); if (!it || !probCol) return;
+    const p = it.preReview;
+    if (!p || p.on !== today()) { toast("Only a review you logged today can be undone here."); refreshReviewedToday(); return; }
+    const { on, ...prev } = p;
+    try { await probCol.doc(id).update(Object.assign(prev, { preReview: firebase.firestore.FieldValue.delete() })); toast("Today's review removed."); }
+    catch (err) { handleWriteError(err); refreshReviewedToday(); }
+  }
+  function refreshReviewedToday() { if (!$("listView").hidden) renderList(); if (P.id && $("pHead")) { const it = items.find(x => x.id === P.id); if (it) { $("pHead").innerHTML = pageHeadHTML(it); typeset($("pHead")); } } }
+  document.addEventListener("change", (e) => {
+    const box = e.target.closest("input[data-rt]"); if (!box) return;
+    const id = box.dataset.rt, it = items.find(x => x.id === id); if (!it) return;
+    if (!canWrite) { box.checked = reviewedToday(it); toast("Sign in as the owner to record reviews."); return; }
+    if (box.checked) { rtOpen.add(id); refreshReviewedToday(); }
+    else if (rtOpen.has(id)) { rtOpen.delete(id); refreshReviewedToday(); }
+    else undoReview(id);
+  });
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-rtrate]");
+    if (b) { e.preventDefault(); logReview(b.dataset.id, b.dataset.rtrate); return; }
+    const c = e.target.closest("[data-rtcancel]");
+    if (c) { e.preventDefault(); rtOpen.delete(c.dataset.rtcancel); refreshReviewedToday(); }
+  });
   const RQ = { again: 0, hard: 0.5, good: 0.9, easy: 1 };
   const VQ = { solo: 0.85, hint: 0.45, editorial: 0.2 };
   function quality(it) { const h = srsOf(it).history; return h.length ? RQ[h[h.length - 1].r] : (VQ[verdictOf(it)] ?? 0.5); }
@@ -207,6 +252,8 @@
     const ms = methods.map((m, i) => `(${letter(i)}) <span class="mname">${esc(m.name || "Untitled")}</span>${m.best ? ` <span class="best">(best)</span>` : ""}`);
     const tags = (it.tags || []).map(t => `<button type="button" class="tag" data-tag="${esc(t)}">${esc(t)}</button>`);
     if (ms.length || tags.length) h += `<p class="meth">${ms.length ? ms.join("&ensp;") + (tags.length ? ".&ensp;" : ".") : ""}${tags.length ? `<i>Techniques:</i> ${joinList(tags)}.` : ""}</p>`;
+    const rt = reviewedTodayHTML(it);
+    if (rt) h += `<p class="rtrow">${rt}</p>`;
     return h + `</div></li>`;
   }
   function renderList() {
@@ -580,6 +627,7 @@
         ${canWrite ? `<button type="button" class="link" id="pEdit">Edit details</button><button type="button" class="link danger" id="pDelete">Delete</button>` : ""}
       </div>
       ${it.summary ? `<p class="sum math" style="margin-top:8px">${esc(it.summary)}</p>` : ""}
+      ${reviewedTodayHTML(it) ? `<p class="rtrow page">${reviewedTodayHTML(it)}</p>` : ""}
       <p class="status">${status}</p>`;
   }
   function problemCollapsed() { try { return localStorage.getItem("solvelog-collapse-" + P.id) === "1"; } catch (e) { return false; } }
@@ -769,7 +817,9 @@
     const it = items.find(x => x.id === R.queue[R.i]); if (!it || !probCol) return;
     if (!canWrite) { toast("Sign in as the owner to record reviews."); return; }
     R.busy = true;
-    try { await probCol.doc(it.id).update(schedule(srsOf(it), r)); R.tally[r]++; R.i++; renderCard(); window.scrollTo({ top: 0 }); }
+    const s0 = srsOf(it), patch = schedule(s0, r);
+    patch.preReview = { interval: s0.interval, ease: s0.ease, reps: s0.reps, lapses: s0.lapses, due: s0.due, mastered: s0.mastered, history: s0.history, revisit: !!it.revisit, on: today() };
+    try { await probCol.doc(it.id).update(patch); R.tally[r]++; R.i++; renderCard(); window.scrollTo({ top: 0 }); }
     catch (err) { handleWriteError(err); }
     R.busy = false;
   }
